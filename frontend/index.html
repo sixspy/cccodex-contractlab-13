@@ -53,8 +53,9 @@ createApp({
     const user=ref(localStorage.getItem('contractlab_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const contracts=ref([]), batches=ref([]), buffers=ref([]), recon=ref({});
+    const rejections=ref([]), reviewQueue=ref([]), appendix=ref({}), contentions=ref([]), policy=ref({});
     const form=ref({subject:'订单入站', payload_fields:'order_id,amount'});
-    const nav=['契约版本','入站校验','双写缓冲','契约对账'];
+    const nav=['契约版本','入站校验','双写缓冲','拒收详情','复核队列','策略附页','契约对账'];
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -79,8 +80,24 @@ createApp({
       batches.value=Array.isArray(b.items)?b.items:[];
       const u=await loadJson('/api/buffers'); if(u===null) return;
       buffers.value=Array.isArray(u.items)?u.items:[];
+      const rj=await loadJson('/api/rejections'); if(rj===null) return;
+      rejections.value=Array.isArray(rj.items)?rj.items:[];
+      const rq=await loadJson('/api/rejections/review-queue'); if(rq===null) return;
+      reviewQueue.value=Array.isArray(rq.items)?rq.items:[];
+      const ap=await loadJson('/api/reject-policy/appendix'); if(ap===null) return;
+      appendix.value=ap&&typeof ap==='object'?ap:{};
+      const ct=await loadJson('/api/reject-contention'); if(ct===null) return;
+      contentions.value=Array.isArray(ct.items)?ct.items:[];
+      const po=await loadJson('/api/reject-policy'); if(po===null) return;
+      policy.value=po&&typeof po==='object'?po:{};
       const q=await loadJson('/api/reconcile'); if(q===null) return;
       recon.value=q&&typeof q==='object'?q:{};
+    }
+    async function review(bid,verdict){
+      actionErr.value='';
+      const r=await fetch('/api/rejections/'+bid+'/review',{method:'POST',headers:auth(),body:JSON.stringify({verdict})});
+      const j=await r.json(); actionErr.value=r.ok?('批次 #'+bid+' 复核：'+j.review_state):(j.detail||'复核失败');
+      await refresh();
     }
     async function validate(){
       actionErr.value='';
@@ -89,7 +106,8 @@ createApp({
       await refresh();
     }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,form,actionErr,login,logout,validate};
+    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,form,actionErr,
+            rejections,reviewQueue,appendix,contentions,policy,login,logout,validate,review};
   },
   template:`
   <div v-if="!token" class="login">
@@ -138,8 +156,43 @@ createApp({
       <tbody><tr v-for="b in buffers" :key="b.id"><td>{{b.id}}</td><td>{{b.batch_id}}</td><td>{{b.subject}}</td><td>{{b.reason}}</td></tr></tbody></table>
     </div>
     <div class="card" v-show="tab===3">
+      <h2>拒收详情（批次与原因流水同成同败）</h2>
+      <table><thead><tr><th>页序</th><th>批次</th><th>主题</th><th>载荷指纹</th><th>拒收原因流水</th><th>复核态</th></tr></thead>
+      <tbody><tr v-for="(r,i) in rejections" :key="r.id">
+        <td>{{i+1}}</td><td>#{{r.batch_id}}</td><td>{{r.subject}}</td><td>{{r.payload_key}}</td><td>{{r.reason}}</td><td>{{r.review_state}}</td>
+      </tr></tbody></table>
+      <p class="meta" v-if="!rejections.length">暂无拒收记录</p>
+    </div>
+    <div class="card" v-show="tab===4">
+      <h2>复核队列</h2>
+      <table><thead><tr><th>批次</th><th>主题</th><th>原因</th><th>复核态</th><th>动作</th></tr></thead>
+      <tbody><tr v-for="q in reviewQueue" :key="q.id">
+        <td>#{{q.batch_id}}</td><td>{{q.subject}}</td><td>{{q.reason}}</td><td>{{q.review_state}}</td>
+        <td>
+          <button class="ghost" @click="review(q.batch_id,'维持拒收')">维持拒收</button>
+          <button class="ghost" @click="review(q.batch_id,'通过')">改判通过（应拦）</button>
+        </td>
+      </tr></tbody></table>
+    </div>
+    <div class="card" v-show="tab===5">
+      <h2>策略附页 · 拒收同败簿</h2>
+      <p class="meta">钉死路径：<b>{{appendix.policy && appendix.policy.path}}</b>（锁定日 {{appendix.policy && appendix.policy.locked_day}}）
+      — 甲路径：拒收批次与原因流水同一事务，失败整笔回滚；当天禁止改口。</p>
+      <table><thead><tr><th>批次</th><th>主题</th><th>载荷指纹</th><th>原因</th><th>复核态</th></tr></thead>
+      <tbody><tr v-for="a in appendix.items" :key="a.batch_id">
+        <td>#{{a.batch_id}}</td><td>{{a.subject}}</td><td>{{a.payload_key}}</td><td>{{a.reason}}</td><td>{{a.review_state}}</td>
+      </tr></tbody></table>
+      <h2 style="margin-top:18px">拒收争用（同载荷后到只登记，不再落拒收）</h2>
+      <table><thead><tr><th>争用#</th><th>载荷指纹</th><th>主题</th><th>已存批次</th><th>时间</th></tr></thead>
+      <tbody><tr v-for="t in contentions" :key="t.id">
+        <td>{{t.id}}</td><td>{{t.payload_key}}</td><td>{{t.subject}}</td><td>#{{t.existing_batch_id}}</td><td>{{t.created_at}}</td>
+      </tr></tbody></table>
+      <p class="meta" v-if="!contentions.length">暂无争用</p>
+    </div>
+    <div class="card" v-show="tab===6">
       <h2>契约对账摘要</h2>
       <p>入站 {{recon.ingress_total}} · 通过 {{recon.passed}} · 缓冲 {{recon.buffered}} · 拒收 {{recon.rejected}} · 缓冲行 {{recon.buffer_rows}} · 对齐 {{recon.aligned}}</p>
+      <p>拒收流水 {{recon.reject_rows}} · 拒收同败对齐 <b>{{recon.reject_aligned}}</b> · 拒收争用 {{recon.reject_contention}}</p>
     </div>
   </div>`
 }).mount('#app');
